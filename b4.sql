@@ -1,67 +1,60 @@
--- Số lượng Trigger: 01 Trigger
--- Thời điểm kích hoạt: BEFORE INSERT và BEFORE UPDATE.
-
--- Logic xử lý ngoại lệ:
--- Ngoại lệ 1 (Hủy lịch): Trong câu lệnh SELECT COUNT, chúng ta thêm điều kiện status <> 'Cancelled'.
--- Ngoại lệ 2 (Trùng chính nó): Khi UPDATE, chúng ta phải loại trừ ID của bản ghi hiện tại ra khỏi danh sách kiểm tra bằng điều kiện id <> NEW.id.
-
 DELIMITER //
 
-CREATE TRIGGER tg_check_double_booking_insert
-BEFORE INSERT ON appointments
-FOR EACH ROW
+CREATE PROCEDURE ProcessEquipmentPurchase(
+    IN p_patient_id INT,
+    IN p_product_id INT,
+    IN p_quantity INT,
+    OUT p_message VARCHAR(255)
+)
 BEGIN
-    DECLARE v_count INT;
+    DECLARE v_stock INT;
+    DECLARE v_price DECIMAL(18,2);
+    DECLARE v_balance DECIMAL(18,2);
+    DECLARE v_status VARCHAR(20);
+    DECLARE v_total_cost DECIMAL(18,2);
 
-    -- Kiểm tra xem bác sĩ đã có lịch nào trùng giờ mà chưa bị hủy hay chưa
-    SELECT COUNT(*) INTO v_count
-    FROM appointments
-    WHERE doctor_id = NEW.doctor_id 
-      AND appointment_time = NEW.appointment_time
-      AND status <> 'Cancelled';
+START TRANSACTION;
 
-    IF v_count > 0 THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Lỗi: Bác sĩ đã có lịch hẹn vào khung giờ này';
-    END IF;
-END //
+    SELECT stock, price INTO v_stock, v_price 
+    FROM Products 
+    WHERE product_id = p_product_id FOR UPDATE;
 
-CREATE TRIGGER tg_check_double_booking_update
-BEFORE UPDATE ON appointments
-FOR EACH ROW
-BEGIN
-    DECLARE v_count INT;
-    
-    SELECT COUNT(*) INTO v_count
-    FROM appointments
-    WHERE doctor_id = NEW.doctor_id 
-      AND appointment_time = NEW.appointment_time
-      AND status <> 'Cancelled'
-      AND id <> NEW.id;
+    SELECT balance, status INTO v_balance, v_status 
+    FROM Wallets 
+    WHERE patient_id = p_patient_id FOR UPDATE;
 
-    IF v_count > 0 THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'Lỗi: Bác sĩ đã có lịch hẹn vào khung giờ này';
+    IF v_stock IS NULL THEN
+        SET p_message = 'Thất bại: Sản phẩm không tồn tại';
+        ROLLBACK;
+    ELSEIF v_balance IS NULL THEN
+        SET p_message = 'Thất bại: Bệnh nhân chưa có ví';
+        ROLLBACK;
+    ELSEIF v_stock < p_quantity THEN
+        SET p_message = 'Thất bại: Kho không đủ sản phẩm';
+        ROLLBACK;
+    ELSEIF v_status = 'Inactive' THEN
+        SET p_message = 'Thất bại: Ví đang bị khóa';
+        ROLLBACK;
+    ELSE
+        SET v_total_cost = v_price * p_quantity;
+
+        IF v_balance < v_total_cost THEN
+            SET p_message = 'Thất bại: Số dư ví không đủ';
+            ROLLBACK;
+        ELSE
+        
+            UPDATE Products 
+            SET stock = stock - p_quantity 
+            WHERE product_id = p_product_id;
+
+            UPDATE Wallets 
+            SET balance = balance - v_total_cost 
+            WHERE patient_id = p_patient_id;
+
+            SET p_message = 'Thành công: Đã xử lý đơn hàng';
+            COMMIT;
+        END IF;
     END IF;
 END //
 
 DELIMITER ;
-
-INSERT INTO appointments (doctor_id, appointment_time, status) 
-VALUES (1, '2026-05-10 08:00:00', 'Pending');
-
-INSERT INTO appointments (doctor_id, appointment_time, status) 
-VALUES (1, '2026-05-10 08:00:00', 'Pending');
-
-
-UPDATE appointments
-SET status = 'Cancelled' 
-WHERE doctor_id = 1 AND appointment_time = '2026-05-10 08:00:00';
-
-INSERT INTO appointments (doctor_id, appointment_time, status) 
-VALUES (1, '2026-05-10 08:00:00', 'Pending');
-
-
-UPDATE appointments 
-SET status = 'Completed' 
-WHERE id = 10; 
